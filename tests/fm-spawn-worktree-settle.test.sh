@@ -58,13 +58,13 @@ SH
   printf '%s\n' "$fakebin"
 }
 
-# make_settle_case <name> <id> <stale_reads> builds a home, a primary project
+# make_settle_case <name> <id> <stale_reads> [git|non-git] builds a home, a primary project
 # with a real worktree (the eventual settled path), and a separate real git
 # repo standing in for the stale path (a real checkout of something else
 # entirely, distinct from both the project and the worktree - mirroring the
 # live incident where the stale read was another real firstmate home).
 make_settle_case() {
-  local name=$1 id=$2 stale_reads=$3 case_dir home proj wt stale fakebin countfile
+  local name=$1 id=$2 stale_reads=$3 stale_kind=${4:-git} case_dir home proj wt stale fakebin countfile
   case_dir="$TMP_ROOT/$name"
   home="$case_dir/home"
   proj="$case_dir/project"
@@ -75,7 +75,11 @@ make_settle_case() {
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
   printf 'codex\n' > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
-  fm_git_init_commit "$stale"
+  case "$stale_kind" in
+    git) fm_git_init_commit "$stale" ;;
+    non-git) mkdir -p "$stale" ;;
+    *) fail "unknown stale path fixture kind: $stale_kind" ;;
+  esac
   mkdir -p "$home/data/$id"
   printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
   touch "$home/state/.last-watcher-beat"
@@ -120,6 +124,26 @@ test_single_stale_first_read_is_not_accepted() {
   pass "a single transient stale pane_current_path read is not accepted as the worktree"
 }
 
+# Shell startup can transiently report a non-Git directory more than once.
+# It is not a candidate worktree, so spawn must keep polling until the real
+# isolated worktree appears instead of accepting it then failing validation.
+test_non_git_transient_reads_do_not_abort_spawn() {
+  local rec id out status
+  id=settle-nongit-stale-z3
+  rec=$(make_settle_case settle-nongit "$id" 2 non-git)
+  read_settle_record "$rec"
+
+  out=$(run_settle_spawn "$id")
+  status=$?
+  expect_code 0 "$status" "spawn should ignore transient non-Git pane paths"
+  assert_contains "$out" "spawned $id" "spawn did not continue to the settled worktree"
+  assert_grep "worktree=$WT_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta did not record the settled worktree after non-Git transient reads"
+  assert_no_grep "worktree=$STALE_DIR" "$HOME_DIR/state/$id.meta" \
+    "meta wrongly recorded the transient non-Git path"
+  pass "transient non-Git pane paths do not abort treehouse spawn"
+}
+
 # A pane that reports the real worktree from the very first read still only
 # costs the loop's existing one-second inter-poll sleep to confirm - not an
 # extra full cycle on top of that.
@@ -142,6 +166,7 @@ test_already_settled_pane_costs_one_confirm_sleep() {
 }
 
 test_single_stale_first_read_is_not_accepted
+test_non_git_transient_reads_do_not_abort_spawn
 test_already_settled_pane_costs_one_confirm_sleep
 
 echo "# all fm-spawn-worktree-settle tests passed"

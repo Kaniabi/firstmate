@@ -1825,6 +1825,16 @@ real_path_or_raw() {  # <path>
   fi
 }
 
+isolated_spawn_worktree_real() {  # <path>
+  local path=$1 path_real worktree_top worktree_top_real
+  path_real=$(cd "$path" 2>/dev/null && pwd -P) || return 1
+  worktree_top=$(git -C "$path_real" rev-parse --show-toplevel 2>/dev/null) || return 1
+  worktree_top_real=$(cd "$worktree_top" 2>/dev/null && pwd -P) || return 1
+  [ "$path_real" = "$worktree_top_real" ] || return 1
+  [ "$path_real" != "$PROJ_ABS_REAL" ] || return 1
+  printf '%s\n' "$path_real"
+}
+
 # Session-provider container-ensure + task creation. tmux stays exactly as P1
 # left it (same session-name / new-window sequence, see bin/backends/tmux.sh);
 # a herdr spawn goes through the version-gated, workspace-per-HOME,
@@ -1835,6 +1845,7 @@ real_path_or_raw() {  # <path>
 # per-backend routing (fm_backend_resolve_selector).
 validate_spawn_worktree() {  # <source> <inspect-target>
   local source=$1 inspect_target=$2 wt_real proj_real wt_top wt_top_real
+  isolated_spawn_worktree_real "$WT" >/dev/null && return 0
   wt_real=
   if ! wt_real=$(cd "$WT" 2>/dev/null && pwd -P); then
     wt_real=
@@ -2432,23 +2443,16 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   # prefix would otherwise make the pane's OS-level cwd read differ from
   # PROJ_ABS on the very first poll, before the pane has actually moved.
   #
-  # A single read that already differs from PROJ_ABS_REAL is not proof the pane
-  # settled there: on some tmux/WSL setups a brand-new window's pane_current_path
-  # transiently reports an unrelated stale path (seen live as another real git
-  # checkout entirely) before the shell catches up with treehouse get's cd. That
-  # stale path still passes the PROJ_ABS_REAL comparison and validate_spawn_worktree
-  # below (it resolves to a real, distinct worktree top-level too), so accepting it
-  # on one read alone silently records the wrong worktree= in state/<id>.meta. Require
-  # two consecutive reads to agree on the same non-project path before accepting it;
-  # a mismatch just becomes the new candidate rather than resetting the wait, so a
-  # pane that is already settled by the first real read only costs the one existing
-  # inter-poll sleep as confirmation, not a whole extra cycle on top.
+  # A pane path qualifies only when it is the root of a distinct Git worktree.
+  # Shell startup can transiently report unrelated checkout or non-Git paths before
+  # treehouse get settles, so require two consecutive qualifying reads before accepting
+  # one; an already-settled path still costs only the existing confirmation sleep.
   candidate=""
   for _ in $(seq 1 60); do
     p=$(spawn_current_path "$WT_TARGET" || true)
     if [ -n "$p" ]; then
-      p_real=$(real_path_or_raw "$p")
-      if [ "$p_real" != "$PROJ_ABS_REAL" ]; then
+      p_real=$(isolated_spawn_worktree_real "$p" 2>/dev/null || true)
+      if [ -n "$p_real" ]; then
         if [ -n "$candidate" ] && [ "$p_real" = "$candidate" ]; then
           WT="$p"
           break
